@@ -22,6 +22,22 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
+    # web module's preBuild drives installWebUiDeps (bun) and buildWebUi (pnpm run build)
+    - name: Set up pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 11
+
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: pnpm
+        cache-dependency-path: web-ui/pnpm-lock.yaml
+
+    - name: Set up Bun
+      uses: oven-sh/setup-bun@v2
+
     - name: Setup Android SDK
       uses: android-actions/setup-android@v4
       with:
@@ -29,6 +45,15 @@ jobs:
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
+
+    - name: Gradle cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: ${{ runner.os }}-gradle-
 
     - name: Build debug APK
       run: ./gradlew assembleDebug --stacktrace
