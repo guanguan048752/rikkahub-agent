@@ -502,6 +502,12 @@ class GenerationLoop(
         conversationModeInjectionIds: Set<Uuid> = emptySet(),
         conversationLorebookIds: Set<Uuid> = emptySet(),
         workspaceCwd: String? = null,
+        /**
+         * Called when the conversation turn completes (success or failure).
+         * Receives the final message list. Used for background post-processing
+         * like automatic skill extraction (SkillLearner).
+         */
+        onConversationComplete: suspend (List<UIMessage>) -> Unit = {},
     ): Flow<GenerationChunk> = flow {
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = providerManager.getProviderByType(provider)
@@ -1176,6 +1182,13 @@ class GenerationLoop(
         .onCompletion {
             AgentOverlay.hide(context)
             handleAutoReturnAfterTurn()
+            // Trigger background post-processing (e.g. SkillLearner auto-extraction)
+            // Run in a separate async scope so it doesn't block the flow completion.
+            val finalMessages = messages
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                runCatching { onConversationComplete(finalMessages) }
+                    .onFailure { Log.w(TAG, "onConversationComplete callback failed: ${it.message}") }
+            }
         }
         .flowOn(Dispatchers.IO)
 
