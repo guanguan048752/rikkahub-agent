@@ -8,9 +8,12 @@ import android.util.Log
 import android.widget.Toast
 import me.rerere.rikkahub.BuildConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
@@ -503,12 +506,18 @@ class GenerationLoop(
         conversationLorebookIds: Set<Uuid> = emptySet(),
         workspaceCwd: String? = null,
         /**
-         * Called when the conversation turn completes (success or failure).
-         * Receives the final message list. Used for background post-processing
-         * like automatic skill extraction (SkillLearner).
+         * Called after the conversation turn completes cleanly (not on cancel/failure).
+         * Receives the final message list including this turn's assistant replies and
+         * tool calls. Used for background post-processing like automatic skill
+         * extraction (SkillLearner).
          */
         onConversationComplete: suspend (List<UIMessage>) -> Unit = {},
-    ): Flow<GenerationChunk> = flow {
+    ): Flow<GenerationChunk> {
+        // Bridge the flow-internal message list out to onCompletion, which otherwise
+        // only captures the original request list (the lambda-local `var messages`
+        // shadows the parameter). Synced once at the end of the happy path.
+        val latestMessages = MutableStateFlow(messages)
+        return flow {
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = providerManager.getProviderByType(provider)
 
@@ -1172,6 +1181,10 @@ class GenerationLoop(
             }
         }
 
+        // Normal-completion exit: publish the final message list (includes this turn's
+        // assistant replies + tool calls) for post-turn consumers. Cancelled/failed
+        // flows never reach here, which is exactly what we want.
+        latestMessages.value = messages
     }
         .onStart {
             // Reset per-turn navigation tracking and surface the overlay so the user
@@ -1179,15 +1192,19 @@ class GenerationLoop(
             AgentTurnTracker.reset()
             AgentOverlay.show(context)
         }
-        .onCompletion {
+        .onCompletion { cause ->
             AgentOverlay.hide(context)
             handleAutoReturnAfterTurn()
-            // Trigger background post-processing (e.g. SkillLearner auto-extraction)
-            // Run in a separate async scope so it doesn't block the flow completion.
-            val finalMessages = messages
-            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-                runCatching { onConversationComplete(finalMessages) }
-                    .onFailure { Log.w(TAG, "onConversationComplete callback failed: ${it.message}") }
+            // Post-turn processing (e.g. SkillLearner): only on clean completion —
+            // cancelled or failed turns produce partial conversations not worth
+            // learning from. Run in a supervised scope so the callback cannot kill
+            // siblings and does not block flow completion.
+            if (cause == null) {
+                val finalMessages = latestMessages.value
+                CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                    runCatching { onConversationComplete(finalMessages) }
+                        .onFailure { Log.w(TAG, "onConversationComplete callback failed: ${it.message}") }
+                }
             }
         }
         .flowOn(Dispatchers.IO)

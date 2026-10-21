@@ -137,7 +137,8 @@ class SkillLearner(
                         sb.appendLine("[Tool call: ${part.name}]")
                     }
                     is me.rerere.ai.ui.UIMessagePart.ToolResult -> {
-                        sb.appendLine("[Tool result: ${part.content.take(200)}]")
+                        // content is a JsonElement — stringify before truncating
+                        sb.appendLine("[Tool result: ${part.content.toString().take(200)}]")
                     }
                     else -> {}
                 }
